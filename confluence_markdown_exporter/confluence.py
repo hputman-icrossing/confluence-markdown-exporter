@@ -3,6 +3,7 @@
 https://developer.atlassian.com/cloud/confluence/rest/v1/intro
 """
 
+
 import functools
 import json
 import logging
@@ -11,6 +12,7 @@ import os
 import re
 import urllib.parse
 from collections.abc import Set
+from datetime import datetime, timedelta
 from os import PathLike
 from pathlib import Path
 from string import Template
@@ -340,6 +342,30 @@ class Page(Document):
     editor2: str
     labels: list["Label"]
     attachments: list["Attachment"]
+    page_metadata: str = ""
+
+    @staticmethod 
+    def get_custom_metadata(response: dict | None) -> dict:
+        if response is None:
+            return {}
+        custom_metadata = {
+            'id' : response.get('id',''),
+            'title' : response.get('title',''),
+            'type' : response.get('type',''),
+            'created' : response.get('history', {}).get('createdDate',''),
+            'author' : response.get('history', {}).get('createdBy', {}).get('displayName',''),
+            'version' : response.get('version', {}).get('number','1'),
+            'lastModified' : response.get('version', {}).get('when',''),
+            'lastModifiedBy' : response.get('version', {}).get('by', {}).get('displayName',''),
+            'lastModifiedWithin365Days': response.get('version', {}).get('when','')[10] >= (datetime.now()-timedelta(days=365)).strftime('%Y-%m-%d') if response.get('version', {}).get('when','') else False,
+            'pageURL' : f"""{response.get('_links', {}).get('base','')}/{response.get('_links', {}).get('webui','')}""",
+            # 'pageURL' : f"""{response.get('_links', {}).get('base','')}/pages/viewpage.action?pageId={response.get('id','')}""",
+        }
+        custom_metadata_html = "<table>\n"
+        custom_metadata_html += "".join(f"<tr><td>{key}</td><td>{value}</td></tr>\n" for key, value in custom_metadata.items())
+        custom_metadata_html += "</table>\n"
+        response['page_metadata'] = custom_metadata_html
+        return response
 
     @property
     def descendants(self) -> list[int]:
@@ -390,9 +416,12 @@ class Page(Document):
 
     @property
     def html(self) -> str:
+        body = self.body
         if settings.export.include_document_title:
-            return f"<h1>{self.title}</h1>{self.body}"
-        return self.body
+            body = f"<h1>{self.title}</h1>{self.body}"
+        if settings.export.include_document_metadata:
+            body = f"{body}<br><br><br><h3>Metadata:</h3><br>{self.page_metadata}"
+        return body
 
     @property
     def markdown(self) -> str:
@@ -499,20 +528,23 @@ class Page(Document):
             ],
             attachments=Attachment.from_page_id(data.get("id", 0)),
             ancestors=[ancestor.get("id") for ancestor in data.get("ancestors", [])][1:],
+            page_metadata=data.get("page_metadata", ""),
         )
 
     @classmethod
     @functools.lru_cache(maxsize=1000)
     def from_id(cls, page_id: int) -> "Page":
         try:
+            response = confluence.get_page_by_id(
+                        page_id,
+                        expand="body.view,body.export_view,body.editor2,metadata.labels,"
+                        "metadata.properties,ancestors,history,version",
+                    )
+            response = cls.get_custom_metadata(response)
             return cls.from_json(
                 cast(
                     "JsonResponse",
-                    confluence.get_page_by_id(
-                        page_id,
-                        expand="body.view,body.export_view,body.editor2,metadata.labels,"
-                        "metadata.properties,ancestors",
-                    ),
+                    response,
                 )
             )
         except (ApiError, HTTPError):
@@ -528,6 +560,7 @@ class Page(Document):
                 labels=[],
                 attachments=[],
                 ancestors=[],
+                page_metadata="",
             )
 
     @classmethod
